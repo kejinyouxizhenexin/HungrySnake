@@ -1,0 +1,3 @@
+﻿  源.cpp
+D:\C语言代码\贪吃蛇2.0\贪吃蛇2.0\源.cpp(273,15): warning C4244: “参数”: 从“time_t”转换到“unsigned int”，可能丢失数据
+  贪吃蛇2.0.vcxproj -> D:\C语言代码\贪吃蛇2.0\x64\Debug\贪吃蛇2.0.exe
