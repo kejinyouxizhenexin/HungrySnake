@@ -1,292 +1,378 @@
-//
-//  main.cpp
-//  hungrySnake
-//
-//  Created by 姚晨 & 崔源on 2025/11/24.
-//
+/*
+ *  终极贪吃蛇 v4.4 - 彻底修复所有编译错误版
+ *  菜单只用 ↑↓ + Enter，WASD 只在游戏内生效，零串台
+ *  编译：gcc snake.c -lncursesw -o snake
+ */
 
-#include <stdio.h>
+#include <locale.h>
+#include <ncurses.h>
 #include <stdlib.h>
-#include <ncurses.h>  // 替换 conio.h 和 windows.h
 #include <time.h>
-#include <unistd.h>   // 用于 usleep (代替 Sleep)
+#include <unistd.h>
 
-#define WIDTH 20
-#define HEIGHT 20
-#define INIT_SNAKE_LENGTH 3
+#define GRID_WIDTH  20
+#define GRID_HEIGHT 20
+#define INIT_LENGTH 3
+#define MAX_LENGTH  200
 
-enum Direction { STOP = 0, LEFT, RIGHT, UP, DOWN };
+//游戏的状态机，分为（主菜单，设置，帮助界面，游戏中，游戏结束画面
+//enum是自动命名
+enum GameState { MAIN_MENU, SETTINGS, HELP_SCREEN, PLAYING, GAME_OVER_SCREEN };
 
+//菜单的选择栏目
+enum MenuOption { START_GAME, SETTINGS_MENU, HELP, EXIT_GAME, MENU_COUNT };
+
+
+//定义了一个Game类型，包含了在游戏进行中会出现的实体
 struct Game {
-    int gameOver;
-    int score;
-    enum Direction dir;
-    int snakeX[100], snakeY[100];
-    int snakeLength;
-    int fruitX, fruitY;
+    // dir: 1左 2右 3上 4下
+    int score, gameOver, dir;
+    //分别用两个数组储存蛇每一节的x,y坐标
+    int snakeX[MAX_LENGTH], snakeY[MAX_LENGTH];
+    //标定了水果的出现位置
+    int length, fruitX, fruitY;
 };
 
-// 上一帧记录（使用 ncurses 时可简化，因为 ncurses 有自己的窗口管理）
-int prevSnakeX[100], prevSnakeY[100];  // 记录上一帧蛇位置
-int prevSnakeLength = 0;
+//创建了一个Game类型的game变量
+struct Game game;
+
+
+//创建了一个GameState类型的gameState变量，用于标定当前的状态机
+//这里初始化状态机为主菜单
+enum GameState gameState = MAIN_MENU;
+int selectedOption = START_GAME;
+int difficulty = 2;             // 1=难 2=中 3=易
+int isPaused = 0;
+
+//消除闪烁（局部刷新，提高整体）
+//用两个数组记录移动之前的老蛇的身体（用来判断老蛇还在不在新蛇上，若不在，则删除）
+int prevSnakeX[MAX_LENGTH], prevSnakeY[MAX_LENGTH];
+//记录上一帧蛇多长，防止在变长时擦错位置
+int prevLength = 0;
 int prevFruitX = -1, prevFruitY = -1;
+//上一帧显示的分数
 int prevScore = -1;
-int firstDraw = 1;
 
-void initConsole() {
-    initscr();             // 初始化 ncurses
-    noecho();              // 禁用回显
-    keypad(stdscr, TRUE);  // 启用特殊键
-    curs_set(0);           // 隐藏光标
-    nodelay(stdscr, TRUE); // 非阻塞输入
-    timeout(0);            // getch() 非阻塞
+void initGame() {
+    //把终端从“普通 shell”变成“游戏全屏模式”
+    //作用：（整个屏幕被清空，光标跳到左上角，所有输出都由程序完全接管）
+    //注意：要在程序结束的时候用endwin();退出游戏模式
+    initscr();
+    
+    //按键不回显
+    //你敲键盘，屏幕不显示你敲的字符
+    noecho();
+    
+    //隐藏光标
+    curs_set(0);
+    
+    //开启特殊键（↑↓←→、Enter、F1-F12等）
+    keypad(stdscr, TRUE);
+    
+    //键盘变成“非阻塞”（敲了才反应，不敲不等）
+    nodelay(stdscr, TRUE);
+    //启动颜色功能
+    start_color();
+    //初始化颜色对
+    init_pair(1, COLOR_BLACK, COLOR_WHITE);
+    init_pair(2, COLOR_GREEN, COLOR_BLACK);
+    init_pair(3, COLOR_RED,   COLOR_BLACK);
 }
 
-void drawChar(short x, short y, char ch) {
-    mvaddch(y, x, ch);  // 在 (y, x) 位置绘制字符（注意 ncurses 是行优先）
+void drawChar(int x, int y, char ch, int color_pair = 0) {
+    if (color_pair) attron(COLOR_PAIR(color_pair));
+    mvaddch(y + 1, x + 1, ch);
+    if (color_pair) attroff(COLOR_PAIR(color_pair));
 }
 
-void drawStaticBorder() {
-    clear();  // 清屏（替换 system("cls")）
+// 正方形边框（横排42个#，竖排20个# + 上下边框）
+void drawBorderAndUI() {
+    clear();
+    attron(COLOR_PAIR(2));
 
-    // 上边界
-    for (int i = 0; i < WIDTH + 2; i++)
-        addch('#');
-    addch('\n');
+    // 上边框：20格 × 2 + 左右两个# = 42个#
+    mvhline(0, 0, '#', GRID_WIDTH * 2 + 2);
 
-    // 中间区域
-    for (int i = 0; i < HEIGHT; i++) {
-        addch('#');
-        for (int j = 0; j < WIDTH; j++)
-            addch(' ');
-        addch('#');
-        addch('\n');
+    // 下边框：同上
+    mvhline(GRID_HEIGHT + 1, 0, '#', GRID_WIDTH * 2 + 2);
+
+    // 左右边框：20 行（不包括上下边框）
+    for (int i = 0; i < GRID_HEIGHT; i++) {
+        mvaddch(i + 1, 0, '#');                    // 左#
+        mvhline(i + 1, 1, ' ', GRID_WIDTH * 2);     // 中间 40 个空格（20格×2）
+        mvaddch(i + 1, GRID_WIDTH * 2 + 1, '#');    // 右#
     }
+    attroff(COLOR_PAIR(2));
 
-    // 下边界
-    for (int i = 0; i < WIDTH + 2; i++)
-        addch('#');
-    addch('\n');
-
-    // 分数和控制信息（使用 mvprintw 定位打印）
-    mvprintw(HEIGHT + 1, 0, "得分: 0");
-    mvprintw(HEIGHT + 2, 0, "控制: W-上 S-下 A-左 D-右 X-退出");
-
-    refresh();  // 刷新屏幕
+    // 信息栏
+    mvprintw(GRID_HEIGHT + 3, 0, "得分: 0");
+    mvprintw(GRID_HEIGHT + 4, 0, "控制: WASD移动  空格暂停  X返回菜单");
+    refresh();
 }
+void drawGame() {
+    static int first = 1;
+    if (first) { drawBorderAndUI(); first = 0; }
 
-void drawGame(struct Game* game) {
-    // 首次绘制时绘制静态边界
-    if (firstDraw) {
-        drawStaticBorder();
-        firstDraw = 0;
-    }
-
-    // 1. 清除上一帧的蛇（只清除不再需要的部分）
-    for (int i = 0; i < prevSnakeLength; i++) {
-        int stillExists = 0;
-        for (int j = 0; j < game->snakeLength; j++) {
-            if (prevSnakeX[i] == game->snakeX[j] + 1 &&
-                prevSnakeY[i] == game->snakeY[j] + 1) {
-                stillExists = 1;
-                break;
+    for (int i = 0; i < prevLength; i++) {
+        int exists = 0;
+        for (int j = 0; j < game.length; j++) {
+            if (prevSnakeX[i] == game.snakeX[j] && prevSnakeY[i] == game.snakeY[j]) {
+                exists = 1; break;
             }
         }
-        if (!stillExists) {
-            drawChar(prevSnakeX[i], prevSnakeY[i], ' ');
-        }
+        if (!exists) drawChar(prevSnakeX[i], prevSnakeY[i], ' ', 0);
     }
 
-    // 2. 绘制新蛇
-    for (int i = 0; i < game->snakeLength; i++) {
+    for (int i = 0; i < game.length; i++) {
         char ch = (i == 0) ? 'O' : 'o';
-        drawChar(game->snakeX[i] + 1, game->snakeY[i] + 1, ch);
-        // 记录当前位置供下一帧使用
-        prevSnakeX[i] = game->snakeX[i] + 1;
-        prevSnakeY[i] = game->snakeY[i] + 1;
+        drawChar(game.snakeX[i], game.snakeY[i], ch, i == 0 ? 2 : 0);
+        prevSnakeX[i] = game.snakeX[i];
+        prevSnakeY[i] = game.snakeY[i];
     }
-    prevSnakeLength = game->snakeLength;
+    prevLength = game.length;
 
-    // 3. 更新食物
-    if (prevFruitX != game->fruitX + 1 || prevFruitY != game->fruitY + 1) {
-        // 清除旧食物（如果存在）
-        if (prevFruitX != -1) {
-            drawChar(prevFruitX, prevFruitY, ' ');
-        }
-        // 绘制新食物
-        drawChar(game->fruitX + 1, game->fruitY + 1, 'F');
-        prevFruitX = game->fruitX + 1;
-        prevFruitY = game->fruitY + 1;
+    if (prevFruitX != game.fruitX || prevFruitY != game.fruitY) {
+        if (prevFruitX != -1) drawChar(prevFruitX, prevFruitY, ' ', 0);
+        drawChar(game.fruitX, game.fruitY, 'F', 3);
+        prevFruitX = game.fruitX;
+        prevFruitY = game.fruitY;
     }
 
-    // 4. 更新分数
-    if (prevScore != game->score) {
-        mvprintw(HEIGHT + 1, 6, "%d    ", game->score);  // 用空格覆盖旧数字
-        prevScore = game->score;
+    if (prevScore != game.score) {
+        mvprintw(GRID_HEIGHT + 3, 6, "%-4d", game.score);
+        prevScore = game.score;
     }
 
-    refresh();  // 刷新屏幕，使变化可见
+    if (isPaused) {
+        attron(A_BOLD | COLOR_PAIR(1));
+        mvprintw(GRID_HEIGHT/2, GRID_WIDTH/2 - 4, " 暂停中 ");
+        attroff(A_BOLD | COLOR_PAIR(1));
+    }
+    refresh();
 }
 
-void setup(struct Game* game) {
-    game->gameOver = 0;
-    game->score = 0;
-    game->dir = RIGHT;
-    game->snakeLength = INIT_SNAKE_LENGTH;
+void setupGame() {
+    clear();                        // 清屏
+    prevLength = 0;                 // 重置上一帧缓存
+    prevFruitX = prevFruitY = -1;    // 重置食物缓存
+    prevScore = -1;                 // 重置分数缓存
+    refresh();                      // 强制刷新
+    drawBorderAndUI();              // 重新画边框和UI
+    game.gameOver = 0;
+    game.score = 0;
+    game.dir = 2;
+    game.length = INIT_LENGTH;
+    isPaused = 0;
 
-    int startX = WIDTH / 2;
-    int startY = HEIGHT / 2;
-    for (int i = 0; i < game->snakeLength; i++) {
-        game->snakeX[i] = startX - i;
-        game->snakeY[i] = startY;
+    int midX = GRID_WIDTH / 2;
+    int midY = GRID_HEIGHT / 2;
+    for (int i = 0; i < game.length; i++) {
+        game.snakeX[i] = midX - i;
+        game.snakeY[i] = midY;
     }
 
-    srand(time(NULL));
-
-    // 生成食物，确保不在蛇身上
-    int validPosition;
+    int ok;
     do {
-        validPosition = 1;
-        game->fruitX = rand() % (WIDTH - 2) + 1;
-        game->fruitY = rand() % (HEIGHT - 2) + 1;
-        for (int i = 0; i < game->snakeLength; i++) {
-            if (game->fruitX == game->snakeX[i] && game->fruitY == game->snakeY[i]) {
-                validPosition = 0;
-                break;
-            }
+        ok = 1;
+        game.fruitX = rand() % (GRID_WIDTH - 2) + 1;
+        game.fruitY = rand() % (GRID_HEIGHT - 2) + 1;
+        for (int i = 0; i < game.length; i++) {
+            if (game.fruitX == game.snakeX[i] && game.fruitY == game.snakeY[i]) { ok = 0; break; }
         }
-    } while (!validPosition);
+    } while (!ok);
 
-    // 初始化上一帧记录
-    prevSnakeLength = 0;
-    prevFruitX = -1;
-    prevFruitY = -1;
-    prevScore = -1;
+    prevLength = 0; prevFruitX = prevFruitY = -1; prevScore = -1;
 }
 
-void input(struct Game* game) {
-    int key = getch();  // ncurses 的 getch()，非阻塞模式下返回 ERR 如果无输入
+void gameLogic() {
+    if (game.gameOver || isPaused) return;
 
-    if (key != ERR) {   // 有输入时处理（替换 _kbhit() 和 _getch()）
-        switch (key) {
-        case 'a': case 'A':
-            if (game->dir != RIGHT) game->dir = LEFT;
-            break;
-        case 'd': case 'D':
-            if (game->dir != LEFT) game->dir = RIGHT;
-            break;
-        case 'w': case 'W':
-            if (game->dir != DOWN) game->dir = UP;
-            break;
-        case 's': case 'S':
-            if (game->dir != UP) game->dir = DOWN;
-            break;
-        case 'x': case 'X':
-            game->gameOver = 1;
-            break;
-        }
-    }
-}
+    int tailX = game.snakeX[game.length - 1];
+    int tailY = game.snakeY[game.length - 1];
 
-void logic(struct Game* game) {
-    if (game->gameOver || game->dir == STOP) return;
-
-    // 保存蛇尾位置
-    int prevX = game->snakeX[game->snakeLength - 1];
-    int prevY = game->snakeY[game->snakeLength - 1];
-
-    // 移动蛇身（从尾部开始更新）
-    for (int i = game->snakeLength - 1; i > 0; i--) {
-        game->snakeX[i] = game->snakeX[i - 1];
-        game->snakeY[i] = game->snakeY[i - 1];
+    for (int i = game.length - 1; i > 0; i--) {
+        game.snakeX[i] = game.snakeX[i-1];
+        game.snakeY[i] = game.snakeY[i-1];
     }
 
-    // 移动蛇头
-    switch (game->dir) {
-    case LEFT:
-        game->snakeX[0]--;
-        break;
-    case RIGHT:
-        game->snakeX[0]++;
-        break;
-    case UP:
-        game->snakeY[0]--;
-        break;
-    case DOWN:
-        game->snakeY[0]++;
-        break;
-    case STOP:        // 加上这行
-        break;
+    switch (game.dir) {
+        case 1: game.snakeX[0]--; break;
+        case 2: game.snakeX[0]++; break;
+        case 3: game.snakeY[0]--; break;
+        case 4: game.snakeY[0]++; break;
     }
 
-    // 检测撞墙
-    if (game->snakeX[0] < 0 || game->snakeX[0] >= WIDTH ||
-        game->snakeY[0] < 0 || game->snakeY[0] >= HEIGHT) {
-        game->gameOver = 1;
+    // 撞墙
+    if (game.snakeX[0] <= 0 || game.snakeX[0] >= (GRID_WIDTH)*2||
+        game.snakeY[0] <= 0 || game.snakeY[0] >= GRID_HEIGHT) {
+        game.gameOver = 1;
         return;
     }
 
-    // 检测撞到自己
-    for (int i = 1; i < game->snakeLength; i++) {
-        if (game->snakeX[0] == game->snakeX[i] && game->snakeY[0] == game->snakeY[i]) {
-            game->gameOver = 1;
+    // 撞自己
+    for (int i = 1; i < game.length; i++) {
+        if (game.snakeX[0] == game.snakeX[i] && game.snakeY[0] == game.snakeY[i]) {
+            game.gameOver = 1;
             return;
         }
     }
 
-    // 检测吃到食物
-    if (game->snakeX[0] == game->fruitX && game->snakeY[0] == game->fruitY) {
-        game->score += 10;
-        // 蛇长度增加
-        game->snakeLength++;
-        game->snakeX[game->snakeLength - 1] = prevX;
-        game->snakeY[game->snakeLength - 1] = prevY;
-        // 生成新食物
-        int validPosition;
+    // 吃食物
+    if (game.snakeX[0] == game.fruitX && game.snakeY[0] == game.fruitY) {
+        game.score += 10;
+        game.length++;
+        game.snakeX[game.length-1] = tailX;
+        game.snakeY[game.length-1] = tailY;
+
+        int ok;
         do {
-            validPosition = 1;
-            game->fruitX = rand() % (WIDTH - 2) + 1;
-            game->fruitY = rand() % (HEIGHT - 2) + 1;
-            // 确保食物不会生成在蛇身上
-            for (int i = 0; i < game->snakeLength; i++) {
-                if (game->fruitX == game->snakeX[i] && game->fruitY == game->snakeY[i]) {
-                    validPosition = 0;
-                    break;
-                }
+            ok = 1;
+            game.fruitX = rand() % (GRID_WIDTH - 2) + 1;
+            game.fruitY = rand() % (GRID_HEIGHT - 2) + 1;
+            for (int i = 0; i < game.length; i++) {
+                if (game.fruitX == game.snakeX[i] && game.fruitY == game.snakeY[i]) { ok = 0; break; break; }
             }
-        } while (!validPosition);
+        } while (!ok);
     }
 }
 
-int main() {
-    struct Game game;
+void drawMainMenu() {
+    clear();
+    attron(A_BOLD | COLOR_PAIR(2));
+    mvprintw(4, 8, "╔══════════════════════════╗");
+    mvprintw(5, 8, "║       贪吃蛇游戏         ║");
+    mvprintw(6, 8, "╚══════════════════════════╝");
+    attroff(A_BOLD | COLOR_PAIR(2));
 
-    printf("=== 流畅版贪吃蛇游戏 ===\n");
-    printf("控制键: W-上, S-下, A-左, D-右, X-退出\n");
-    printf("按任意键开始游戏...");
-    getchar();  // 等待按键（标准输入）
-
-    // 初始化控制台
-    initConsole();
-
-    setup(&game);
-
-    while (!game.gameOver) {
-        drawGame(&game);  // 使用局部更新绘制
-        input(&game);
-        logic(&game);
-        usleep(200000);  // 控制游戏速度（200ms），替换 Sleep(200)
+    const char* items[] = {"开始游戏", "游戏设置", "游戏说明", "退出游戏"};
+    for (int i = 0; i < MENU_COUNT; i++) {
+        if (i == selectedOption) attron(A_REVERSE | COLOR_PAIR(1));
+        mvprintw(9 + i, 12, i == selectedOption ? " %s" : "  %s", items[i]);
+        if (i == selectedOption) attroff(A_REVERSE | COLOR_PAIR(1));
     }
-
-    // 游戏结束显示
-    mvprintw(HEIGHT + 3, 0, "游戏结束！最终得分: %d", game.score);
-    mvprintw(HEIGHT + 4, 0, "按任意键退出...");
+    mvprintw(16, 8, "↑↓ 选择项目    Enter 确认");
     refresh();
+}
 
-    // 等待按键退出（切换到阻塞模式）
+void drawSettings() {
+    clear();
+    attron(A_BOLD | COLOR_PAIR(2));
+    mvprintw(4, 10, "╔══════════════════╗");
+    mvprintw(5, 10, "║     游戏设置     ║");
+    mvprintw(6, 10, "╚══════════════════╝");
+    attroff(A_BOLD | COLOR_PAIR(2));
+
+    const char* diffs[] = {"困难 (60ms)", "中等 (120ms)", "简单 (200ms)"};
+    for (int i = 0; i < 3; i++) {
+        if (i == difficulty-1) attron(A_REVERSE | COLOR_PAIR(1));
+        mvprintw(9 + i, 12, i == difficulty-1 ? " %s" : "  %s", diffs[i]);
+        if (i == difficulty-1) attroff(A_REVERSE | COLOR_PAIR(1));
+    }
+    mvprintw(15, 8, "当前速度：%s", diffs[difficulty-1]);
+    mvprintw(17, 8, "↑↓ 选择    Enter 确认    ESC 返回");
+    refresh();
+}
+
+void drawHelp() {
+    clear();
+    mvprintw(3, 8, "╔══════════════════════╗");
+    mvprintw(4, 8, "║       游戏说明       ║");
+    mvprintw(5, 8, "╚══════════════════════╝");
+    mvprintw(7,  6, "控制：W↑ S↓ A← D→");
+    mvprintw(8,  6, "空格键 — 暂停/继续");
+    mvprintw(9,  6, "X 键   — 返回主菜单");
+    mvprintw(11, 6, "规则：");
+    mvprintw(12, 8, "• 吃到 F 得10分并变长");
+    mvprintw(13, 8, "• 撞墙或撞自己结束");
+    mvprintw(16, 6, "按任意键返回…");
+    refresh();
     nodelay(stdscr, FALSE);
     getch();
-    endwin();  // 结束 ncurses 模式
+    nodelay(stdscr, TRUE);
+    gameState = MAIN_MENU;
+}
 
+void drawGameOver() {
+    clear();
+    attron(A_BOLD | COLOR_PAIR(3));
+    mvprintw(8, 8, "╔══════════════════╗");
+    mvprintw(9, 8, "║    游戏结束！    ║");
+    mvprintw(10,8, "╚══════════════════╝");
+    attroff(A_BOLD | COLOR_PAIR(3));
+    mvprintw(12, 10, "最终得分：%d", game.score);
+    mvprintw(15, 8, "按 R 重新开始");
+    mvprintw(16, 8, "按 X 退出游戏");
+    refresh();
+}
+
+int main() {
+    // ============ 解决中文乱码的终极三板斧 ============
+    setlocale(LC_ALL, "");     // 让 C 运行库支持 UTF-8（必须）
+    // =================================================
+    
+    srand(time(NULL));
+    initGame();
+
+    while (1) {
+        int key = getch();
+
+        switch (gameState) {
+            case MAIN_MENU: {
+                if (key != ERR) {
+                    if (key == KEY_UP)   selectedOption = (selectedOption - 1 + MENU_COUNT) % MENU_COUNT;
+                    if (key == KEY_DOWN) selectedOption = (selectedOption + 1) % MENU_COUNT;
+                    if (key == '\n' || key == KEY_ENTER) {
+                        if (selectedOption == START_GAME) { gameState = PLAYING; setupGame(); }
+                        else if (selectedOption == SETTINGS_MENU) gameState = SETTINGS;
+                        else if (selectedOption == HELP) drawHelp();
+                        else if (selectedOption == EXIT_GAME) { endwin();
+                                                                return 0; }
+                    }
+                }
+                drawMainMenu();
+                break;
+            }
+
+            case SETTINGS: {
+                if (key != ERR) {
+                    if (key == KEY_UP)   difficulty = difficulty==1 ? 3 : difficulty-1;
+                    if (key == KEY_DOWN) difficulty = difficulty==3 ? 1 : difficulty+1;
+                    if (key == '\n' || key == KEY_ENTER || key == 27) gameState = MAIN_MENU;
+                }
+                drawSettings();
+                break;
+            }
+
+            case PLAYING: {
+                if (key != ERR) {
+                    if (key == 'a' || key == 'A') if (game.dir != 2) game.dir = 1;
+                    if (key == 'd' || key == 'D') if (game.dir != 1) game.dir = 2;
+                    if (key == 'w' || key == 'W') if (game.dir != 4) game.dir = 3;
+                    if (key == 's' || key == 'S') if (game.dir != 3) game.dir = 4;
+                    if (key == ' ') isPaused = !isPaused;
+                    if (key == 'x' || key == 'X') gameState = MAIN_MENU;
+                }
+
+                drawGame();
+                gameLogic();
+
+                int delay = difficulty==1 ? 60000 : difficulty==2 ? 120000 : 200000;
+                usleep(delay);
+
+                if (game.gameOver) gameState = GAME_OVER_SCREEN;
+                break;
+            }
+
+            case GAME_OVER_SCREEN: {
+                drawGameOver();
+                if (key == 'r' || key == 'R') { gameState = PLAYING; setupGame(); }
+                if (key == 'x' || key == 'X') { endwin(); return 0; }
+                break;
+            }
+        }
+        usleep(10000);
+    }
+
+    endwin();
     return 0;
 }
